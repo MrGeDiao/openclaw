@@ -23,7 +23,9 @@ import { MemoryManagerSyncOps } from "./manager-sync-ops.js";
 const VECTOR_TABLE = "chunks_vec";
 const FTS_TABLE = "chunks_fts";
 const EMBEDDING_CACHE_TABLE = "embedding_cache";
-const EMBEDDING_BATCH_MAX_TOKENS = 8000;
+// Practice patch: keep remote multimodal embedding requests smaller to avoid
+// provider-side disconnects on historical media refreshes.
+const EMBEDDING_BATCH_MAX_TOKENS = 2000;
 const EMBEDDING_INDEX_CONCURRENCY = 4;
 const EMBEDDING_RETRY_MAX_ATTEMPTS = 3;
 const EMBEDDING_RETRY_BASE_DELAY_MS = 500;
@@ -31,7 +33,9 @@ const EMBEDDING_RETRY_MAX_DELAY_MS = 8000;
 const BATCH_FAILURE_LIMIT = 2;
 const EMBEDDING_QUERY_TIMEOUT_REMOTE_MS = 60_000;
 const EMBEDDING_QUERY_TIMEOUT_LOCAL_MS = 5 * 60_000;
-const EMBEDDING_BATCH_TIMEOUT_REMOTE_MS = 2 * 60_000;
+// Practice patch: Gemini multimodal embedding batches over historical media can
+// exceed the upstream 120s remote timeout; keep remote in the same range as local.
+const EMBEDDING_BATCH_TIMEOUT_REMOTE_MS = 10 * 60_000;
 const EMBEDDING_BATCH_TIMEOUT_LOCAL_MS = 10 * 60_000;
 
 const vectorToBlob = (embedding: number[]): Buffer =>
@@ -331,10 +335,37 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (this.isBatchNetworkError(message)) {
+          if (attempt < EMBEDDING_RETRY_MAX_ATTEMPTS) {
+            const waitMs = Math.min(
+              EMBEDDING_RETRY_MAX_DELAY_MS,
+              Math.round(delayMs * (1 + Math.random() * 0.2)),
+            );
+            log.warn(`memory embeddings network error; retrying batch in ${waitMs}ms`);
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            delayMs *= 2;
+            attempt += 1;
+            continue;
+          }
+          if (texts.length > 1) {
+            const splitAt = Math.ceil(texts.length / 2);
+            log.warn(
+              `memory embeddings: network failure on batch of ${texts.length}; splitting into ${splitAt} + ${texts.length - splitAt}`,
+            );
+            const left = await this.embedBatchWithRetry(texts.slice(0, splitAt));
+            const right = await this.embedBatchWithRetry(texts.slice(splitAt));
+            return [...left, ...right];
+          }
+        }
         if (!this.isRetryableEmbeddingError(message) || attempt >= EMBEDDING_RETRY_MAX_ATTEMPTS) {
           throw err;
         }
-        await this.waitForEmbeddingRetry(delayMs, "retrying");
+        const waitMs = Math.min(
+          EMBEDDING_RETRY_MAX_DELAY_MS,
+          Math.round(delayMs * (1 + Math.random() * 0.2)),
+        );
+        log.warn(`memory embeddings rate limited; retrying in ${waitMs}ms`);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
         delayMs *= 2;
         attempt += 1;
       }
@@ -365,23 +396,47 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (this.isBatchNetworkError(message)) {
+          if (attempt < EMBEDDING_RETRY_MAX_ATTEMPTS) {
+            const waitMs = Math.min(
+              EMBEDDING_RETRY_MAX_DELAY_MS,
+              Math.round(delayMs * (1 + Math.random() * 0.2)),
+            );
+            log.warn(`memory embeddings network error; retrying structured batch in ${waitMs}ms`);
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            delayMs *= 2;
+            attempt += 1;
+            continue;
+          }
+          if (inputs.length > 1) {
+            const splitAt = Math.ceil(inputs.length / 2);
+            log.warn(
+              `memory embeddings: network failure on structured batch of ${inputs.length}; splitting into ${splitAt} + ${inputs.length - splitAt}`,
+            );
+            const left = await this.embedBatchInputsWithRetry(inputs.slice(0, splitAt));
+            const right = await this.embedBatchInputsWithRetry(inputs.slice(splitAt));
+            return [...left, ...right];
+          }
+        }
         if (!this.isRetryableEmbeddingError(message) || attempt >= EMBEDDING_RETRY_MAX_ATTEMPTS) {
           throw err;
         }
-        await this.waitForEmbeddingRetry(delayMs, "retrying structured batch");
+        const waitMs = Math.min(
+          EMBEDDING_RETRY_MAX_DELAY_MS,
+          Math.round(delayMs * (1 + Math.random() * 0.2)),
+        );
+        log.warn(`memory embeddings rate limited; retrying structured batch in ${waitMs}ms`);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
         delayMs *= 2;
         attempt += 1;
       }
     }
   }
 
-  private async waitForEmbeddingRetry(delayMs: number, action: string): Promise<void> {
-    const waitMs = Math.min(
-      EMBEDDING_RETRY_MAX_DELAY_MS,
-      Math.round(delayMs * (1 + Math.random() * 0.2)),
+  private isBatchNetworkError(message: string): boolean {
+    return /(fetch failed|econnreset|econnrefused|socket|connection closed|other side closed|network error|terminated)/i.test(
+      message,
     );
-    log.warn(`memory embeddings rate limited; ${action} in ${waitMs}ms`);
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
 
   private isRetryableEmbeddingError(message: string): boolean {
