@@ -323,7 +323,7 @@ describe("applyMediaUnderstanding", () => {
     tempMediaFileCache.clear();
   });
 
-  it("sets Transcript and replaces Body when audio transcription succeeds", async () => {
+  it("sets Transcript while keeping BodyForAgent voice-first when audio transcription succeeds", async () => {
     const ctx = await createAudioCtx();
     const result = await applyMediaUnderstanding({
       ctx,
@@ -338,7 +338,7 @@ describe("applyMediaUnderstanding", () => {
       body: "[Audio]\nTranscript:\ntranscribed text",
       commandBody: "transcribed text",
     });
-    expect((ctx as unknown as { BodyForAgent?: string }).BodyForAgent).toBe(ctx.Body);
+    expect((ctx as unknown as { BodyForAgent?: string }).BodyForAgent).toBe("transcribed text");
   });
 
   it("skips file blocks for text-like audio when transcription succeeds", async () => {

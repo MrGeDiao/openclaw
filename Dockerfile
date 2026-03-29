@@ -256,4 +256,45 @@ USER node
 # For external access from host/ingress, override bind to "lan" and set auth.
 HEALTHCHECK --interval=3m --timeout=10s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# --- OpenClaw: extra cli packages (offline-first) ---
+USER root
+ARG OPENCLAW_DOCKER_NPM_GLOBAL_PACKAGES
+ARG OPENCLAW_DOCKER_ACPX_NPM_PACKAGES
+ARG OPENCLAW_DOCKER_FEISHU_PLUGIN_NPM_SPEC
+ARG OPENCLAW_DOCKER_FEISHU_NPM_PACKAGES
+ARG OPENCLAW_DOCKER_DIFFS_NPM_PACKAGES
+ARG OPENCLAW_DOCKER_PIP_PACKAGES
+RUN if [ -n "${OPENCLAW_DOCKER_NPM_GLOBAL_PACKAGES:-}" ]; then npm i -g ${OPENCLAW_DOCKER_NPM_GLOBAL_PACKAGES}; fi
+USER node
+RUN if [ -n "${OPENCLAW_DOCKER_ACPX_NPM_PACKAGES:-}" ] && [ -d /app/extensions/acpx ]; then cd /app/extensions/acpx && npm i ${OPENCLAW_DOCKER_ACPX_NPM_PACKAGES}; fi
+RUN if [ -n "${OPENCLAW_DOCKER_FEISHU_PLUGIN_NPM_SPEC:-}" ] && [ -d /app/extensions/feishu ]; then \
+      tmp="$(mktemp -d)" && \
+      cd "$tmp" && \
+      pkg="$(npm pack ${OPENCLAW_DOCKER_FEISHU_PLUGIN_NPM_SPEC} | tail -n 1)" && \
+      tar -xzf "$pkg" && \
+      find /app/extensions/feishu -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf {} + && \
+      cp -a package/. /app/extensions/feishu/ && \
+      rm -rf "$tmp"; \
+    fi
+RUN if [ -n "${OPENCLAW_DOCKER_FEISHU_NPM_PACKAGES:-}" ] && [ -d /app/extensions/feishu ]; then cd /app/extensions/feishu && npm i ${OPENCLAW_DOCKER_FEISHU_NPM_PACKAGES}; fi
+RUN if [ -n "${OPENCLAW_DOCKER_DIFFS_NPM_PACKAGES:-}" ] && [ -d /app/extensions/diffs ]; then cd /app/extensions/diffs && npm i ${OPENCLAW_DOCKER_DIFFS_NPM_PACKAGES}; fi
+USER root
+RUN if [ -n "${OPENCLAW_DOCKER_PIP_PACKAGES:-}" ]; then \
+      mkdir -p /opt/openclaw/venvs && \
+      python3 -m venv /opt/openclaw/venvs/cli && \
+      /opt/openclaw/venvs/cli/bin/pip install --no-cache-dir --upgrade pip && \
+      /opt/openclaw/venvs/cli/bin/pip install --no-cache-dir ${OPENCLAW_DOCKER_PIP_PACKAGES} && \
+      for f in /opt/openclaw/venvs/cli/bin/*; do \
+        b="${f##*/}"; \
+        case "$b" in python|python3|python3.*|pip|pip3|pip3.*|activate|activate.*) continue ;; esac; \
+        if [ -x "$f" ]; then ln -sf "$f" "/usr/local/bin/$b"; fi; \
+      done; \
+    fi
+USER node
+# --- end extra cli packages ---
+# --- OpenClaw: login-shell PATH for local bin ---
+USER root
+RUN printf '%s\n' 'export PATH="/home/node/.openclaw/local/bin:$PATH"' > /etc/profile.d/openclaw-local-bin.sh && chmod 644 /etc/profile.d/openclaw-local-bin.sh
+USER node
+# --- end login-shell PATH ---
 CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]

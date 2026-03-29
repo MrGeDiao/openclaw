@@ -38,7 +38,7 @@ export type ChatHost = {
   onSlashAction?: (action: string) => void;
 };
 
-export const CHAT_SESSIONS_ACTIVE_MINUTES = 120;
+export const CHAT_SESSIONS_ACTIVE_MINUTES = 1440;
 
 export function isChatBusy(host: ChatHost) {
   return host.chatSending || Boolean(host.chatRunId);
@@ -359,7 +359,7 @@ export async function refreshChat(host: ChatHost, opts?: { scheduleScroll?: bool
   await Promise.all([
     loadChatHistory(host as unknown as OpenClawApp),
     loadSessions(host as unknown as OpenClawApp, {
-      activeMinutes: 0,
+      activeMinutes: CHAT_SESSIONS_ACTIVE_MINUTES,
       limit: 0,
       includeGlobal: true,
       includeUnknown: true,

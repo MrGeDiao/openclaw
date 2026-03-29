@@ -504,7 +504,11 @@ export async function applyMediaUnderstanding(params: {
       const audioOutputs = outputs.filter((output) => output.kind === "audio.transcription");
       if (audioOutputs.length > 0) {
         const transcript = formatAudioTranscripts(audioOutputs);
+        const voiceBodyForAgent = [originalUserText, transcript]
+          .map((value) => value?.trim())
+          .filter((value): value is string => Boolean(value));
         ctx.Transcript = transcript;
+        ctx.BodyForAgent = voiceBodyForAgent.join("\n\n");
         if (originalUserText) {
           ctx.CommandBody = originalUserText;
           ctx.RawBody = originalUserText;
@@ -544,7 +548,7 @@ export async function applyMediaUnderstanding(params: {
     }
     if (outputs.length > 0 || fileBlocks.length > 0) {
       finalizeInboundContext(ctx, {
-        forceBodyForAgent: true,
+        forceBodyForAgent: outputs.length > 0 && !outputs.some((output) => output.kind === "audio.transcription"),
         forceBodyForCommands: outputs.length > 0 || fileBlocks.length > 0,
       });
     }

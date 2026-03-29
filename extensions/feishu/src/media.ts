@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { Readable } from "stream";
 import type * as Lark from "@larksuiteoapi/node-sdk";
-import { mediaKindFromMime } from "openclaw/plugin-sdk/media-runtime";
+import { mediaKindFromMime, runFfprobe } from "openclaw/plugin-sdk/media-runtime";
 import { withTempDownloadPath, type ClawdbotConfig } from "../runtime-api.js";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
@@ -520,6 +520,87 @@ export function detectFileType(
   }
 }
 
+async function getFeishuAudioDurationMs(params: {
+  buffer: Buffer;
+  fileName: string;
+}): Promise<number> {
+  const { buffer, fileName } = params;
+
+  return withTempDownloadPath(
+    {
+      prefix: "openclaw-feishu-audio",
+      fileName,
+    },
+    async (tmpPath) => {
+      await fs.promises.writeFile(tmpPath, buffer);
+      const stdout = await runFfprobe([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "csv=p=0",
+        tmpPath,
+      ]);
+      const durationSecs = Number.parseFloat(stdout.trim());
+      if (!Number.isFinite(durationSecs) || durationSecs <= 0) {
+        throw new Error("Could not parse audio duration");
+      }
+      return Math.max(1, Math.round(durationSecs * 1000));
+    },
+  );
+}
+
+function normalizeFeishuVoiceFileName(fileName: string): string {
+  const trimmed = fileName.trim();
+  if (!trimmed) {
+    return "voice.opus";
+  }
+  return /\.(opus|ogg)$/i.test(trimmed) ? trimmed : `${trimmed}.opus`;
+}
+
+async function sendVoiceFeishu(params: {
+  cfg: ClawdbotConfig;
+  to: string;
+  mediaBuffer: Buffer;
+  fileName: string;
+  replyToMessageId?: string;
+  replyInThread?: boolean;
+  accountId?: string;
+}): Promise<SendMediaResult> {
+  const {
+    cfg,
+    to,
+    mediaBuffer,
+    fileName,
+    replyToMessageId,
+    replyInThread,
+    accountId,
+  } = params;
+  const normalizedFileName = normalizeFeishuVoiceFileName(fileName);
+  const duration = await getFeishuAudioDurationMs({
+    buffer: mediaBuffer,
+    fileName: normalizedFileName,
+  });
+  const { fileKey } = await uploadFileFeishu({
+    cfg,
+    file: mediaBuffer,
+    fileName: normalizedFileName,
+    fileType: "opus",
+    duration,
+    accountId,
+  });
+  return sendFileFeishu({
+    cfg,
+    to,
+    fileKey,
+    msgType: "audio",
+    replyToMessageId,
+    replyInThread,
+    accountId,
+  });
+}
+
 function resolveFeishuOutboundMediaKind(params: { fileName: string; contentType?: string }): {
   fileType?: "opus" | "mp4" | "pdf" | "doc" | "xls" | "ppt" | "stream";
   msgType: "image" | "file" | "audio" | "media";
@@ -581,6 +662,7 @@ export async function sendMediaFeishu(params: {
   replyToMessageId?: string;
   replyInThread?: boolean;
   accountId?: string;
+  audioAsVoice?: boolean;
   /** Allowed roots for local path reads; required for local filePath to work. */
   mediaLocalRoots?: readonly string[];
 }): Promise<SendMediaResult> {
@@ -593,6 +675,7 @@ export async function sendMediaFeishu(params: {
     replyToMessageId,
     replyInThread,
     accountId,
+    audioAsVoice,
     mediaLocalRoots,
   } = params;
   const account = resolveFeishuRuntimeAccount({ cfg, accountId });
@@ -622,6 +705,21 @@ export async function sendMediaFeishu(params: {
   }
 
   const routing = resolveFeishuOutboundMediaKind({ fileName: name, contentType });
+
+  if (audioAsVoice) {
+    if (routing.msgType !== "audio" || routing.fileType !== "opus") {
+      throw new Error("Feishu voice messages require .opus/.ogg audio media");
+    }
+    return sendVoiceFeishu({
+      cfg,
+      to,
+      mediaBuffer: buffer,
+      fileName: name,
+      replyToMessageId,
+      replyInThread,
+      accountId,
+    });
+  }
 
   if (routing.msgType === "image") {
     const { imageKey } = await uploadImageFeishu({ cfg, image: buffer, accountId });

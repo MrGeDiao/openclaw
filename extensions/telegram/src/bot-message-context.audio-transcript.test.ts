@@ -60,14 +60,14 @@ async function buildGroupVoiceContext(params: {
   });
 }
 
-function expectTranscriptRendered(
+function expectTranscriptKeptInternal(
   ctx: Awaited<ReturnType<typeof buildGroupVoiceContext>>,
   transcript: string,
 ) {
   expect(ctx).not.toBeNull();
-  expect(ctx?.ctxPayload?.BodyForAgent).toBe(transcript);
-  expect(ctx?.ctxPayload?.Body).toContain(transcript);
-  expect(ctx?.ctxPayload?.Body).not.toContain("<media:audio>");
+  expect(ctx?.ctxPayload?.BodyForAgent).toBe("<media:audio>");
+  expect(ctx?.ctxPayload?.Body).toContain("<media:audio>");
+  expect(ctx?.ctxPayload?.Body).not.toContain(transcript);
 }
 
 function expectAudioPlaceholderRendered(ctx: Awaited<ReturnType<typeof buildGroupVoiceContext>>) {
@@ -80,7 +80,7 @@ describe("buildTelegramMessageContext audio transcript body", () => {
     transcribeFirstAudioMock.mockReset();
   });
 
-  it("uses preflight transcript as BodyForAgent for mention-gated group voice messages", async () => {
+  it("keeps preflight transcript internal for mention-gated group voice messages", async () => {
     transcribeFirstAudioMock.mockResolvedValueOnce("hey bot please help");
 
     const ctx = await buildGroupVoiceContext({
@@ -95,7 +95,7 @@ describe("buildTelegramMessageContext audio transcript body", () => {
     });
 
     expect(transcribeFirstAudioMock).toHaveBeenCalledTimes(1);
-    expectTranscriptRendered(ctx, "hey bot please help");
+    expectTranscriptKeptInternal(ctx, "hey bot please help");
   });
 
   it("skips preflight transcription when disableAudioPreflight is true", async () => {

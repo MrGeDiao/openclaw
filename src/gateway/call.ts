@@ -872,6 +872,36 @@ async function executeGatewayRequestWithScopes<T>(params: {
   });
 }
 
+function shouldRetryGatewayNormalCloseOnce(params: {
+  err: unknown;
+  opts: CallGatewayBaseOptions;
+  url: string;
+  attempt: number;
+}): boolean {
+  if (params.attempt > 0) {
+    return false;
+  }
+  const mode = params.opts.mode ?? GATEWAY_CLIENT_MODES.BACKEND;
+  const clientName = params.opts.clientName ?? GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT;
+  if (mode !== GATEWAY_CLIENT_MODES.CLI && clientName !== GATEWAY_CLIENT_NAMES.CLI) {
+    return false;
+  }
+  if (
+    !params.url.startsWith("ws://127.0.0.1:") &&
+    !params.url.startsWith("ws://localhost:") &&
+    !params.url.startsWith("ws://[::1]:")
+  ) {
+    return false;
+  }
+  const message =
+    typeof params.err === "string"
+      ? params.err
+      : params.err instanceof Error
+        ? params.err.message
+        : "";
+  return message.includes("gateway closed (1000 normal closure): no close reason");
+}
+
 async function callGatewayWithScopes<T = Record<string, unknown>>(
   opts: CallGatewayBaseOptions,
   scopes: OperatorScope[],
@@ -897,17 +927,27 @@ async function callGatewayWithScopes<T = Record<string, unknown>>(
   const url = connectionDetails.url;
   const tlsFingerprint = await resolveGatewayTlsFingerprint({ opts, context, url });
   const { token, password } = resolvedCredentials;
-  return await executeGatewayRequestWithScopes<T>({
-    opts,
-    scopes,
-    url,
-    token,
-    password,
-    tlsFingerprint,
-    timeoutMs,
-    safeTimerTimeoutMs,
-    connectionDetails,
-  });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await executeGatewayRequestWithScopes<T>({
+        opts,
+        scopes,
+        url,
+        token,
+        password,
+        tlsFingerprint,
+        timeoutMs,
+        safeTimerTimeoutMs,
+        connectionDetails,
+      });
+    } catch (err) {
+      if (!shouldRetryGatewayNormalCloseOnce({ err, opts, url, attempt })) {
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+  throw new Error("gateway retry exhausted");
 }
 
 export async function callGatewayScoped<T = Record<string, unknown>>(

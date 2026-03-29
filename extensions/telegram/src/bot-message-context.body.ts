@@ -201,13 +201,12 @@ export async function resolveTelegramInboundBody(params: {
     }
   }
 
-  if (hasAudio && bodyText === "<media:audio>" && preflightTranscript) {
-    bodyText = preflightTranscript;
-  }
+  // Keep the audio placeholder for downstream execution.
+  // Preflight transcript here is only for mention detection, not BodyForAgent.
 
   if (!bodyText && allMedia.length > 0) {
     if (hasAudio) {
-      bodyText = preflightTranscript || "<media:audio>";
+      bodyText = "<media:audio>";
     } else {
       bodyText = `<media:image>${allMedia.length > 1 ? ` (${allMedia.length} images)` : ""}`;
     }

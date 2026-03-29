@@ -154,6 +154,7 @@ export const feishuOutbound: ChannelOutboundAdapter = {
       mediaLocalRoots,
       replyToId,
       threadId,
+      audioAsVoice,
     }) => {
       const replyToMessageId = resolveReplyToMessageId({ replyToId, threadId });
       // Send text first if provided
@@ -177,6 +178,7 @@ export const feishuOutbound: ChannelOutboundAdapter = {
             accountId: accountId ?? undefined,
             mediaLocalRoots,
             replyToMessageId,
+            audioAsVoice,
           });
         } catch (err) {
           // Log the error for debugging

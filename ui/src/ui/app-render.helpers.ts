@@ -2,7 +2,7 @@ import { html, nothing } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { parseAgentSessionKey } from "../../../src/sessions/session-key-utils.js";
 import { t } from "../i18n/index.ts";
-import { refreshChat } from "./app-chat.ts";
+import { CHAT_SESSIONS_ACTIVE_MINUTES, refreshChat } from "./app-chat.ts";
 import { syncUrlWithSessionKey } from "./app-settings.ts";
 import type { AppViewState } from "./app-view-state.ts";
 import { OpenClawApp } from "./app.ts";
@@ -519,7 +519,7 @@ export function switchChatSession(state: AppViewState, nextSessionKey: string) {
 
 async function refreshSessionOptions(state: AppViewState) {
   await loadSessions(state as unknown as Parameters<typeof loadSessions>[0], {
-    activeMinutes: 0,
+    activeMinutes: CHAT_SESSIONS_ACTIVE_MINUTES,
     limit: 0,
     includeGlobal: true,
     includeUnknown: true,
