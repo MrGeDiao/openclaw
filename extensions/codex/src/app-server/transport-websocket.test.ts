@@ -12,14 +12,12 @@ describe("Codex app-server websocket transport", () => {
     }
     clients.length = 0;
     await Promise.all(
-      servers
-        .splice(0)
-        .map(
-          (server) =>
-            new Promise<void>((resolve, reject) =>
-              server.close((error) => (error ? reject(error) : resolve())),
-            ),
-        ),
+      servers.splice(0).map(
+        (server) =>
+          new Promise<void>((resolve, reject) => {
+            server.close((error) => (error ? reject(error) : resolve()));
+          }),
+      ),
     );
   });
 
@@ -33,7 +31,7 @@ describe("Codex app-server websocket transport", () => {
         const message = JSON.parse(rawDataToText(data)) as { id?: number; method?: string };
         if (message.method === "initialize") {
           socket.send(
-            JSON.stringify({ id: message.id, result: { userAgent: "openclaw/0.118.0" } }),
+            JSON.stringify({ id: message.id, result: { userAgent: "openclaw/0.125.0" } }),
           );
           return;
         }
@@ -42,7 +40,9 @@ describe("Codex app-server websocket transport", () => {
         }
       });
     });
-    await new Promise<void>((resolve) => server.once("listening", resolve));
+    await new Promise<void>((resolve) => {
+      server.once("listening", resolve);
+    });
     const address = server.address();
     if (!address || typeof address === "string") {
       throw new Error("expected websocket test server port");

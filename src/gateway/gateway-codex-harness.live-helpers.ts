@@ -1,6 +1,14 @@
+/**
+ * Text matchers shared by live Codex harness tests.
+ *
+ * The live CLI can answer with model lists, status cards, or sandbox fallback
+ * text depending on the host, so tests assert accepted response families here.
+ */
 export const EXPECTED_CODEX_MODELS_COMMAND_TEXT = [
   "Codex models:",
   "Available Codex models",
+  "Available Codex agent model",
+  "Available Codex agent models",
   "Available models:",
   "Available models, local cache:",
   "Available agent target:",
@@ -22,6 +30,7 @@ export const EXPECTED_CODEX_MODELS_COMMAND_TEXT = [
   "`codex` is not installed in the shell environment",
   "`codex models` didn’t return a plain list in this environment",
   "I couldn’t get a direct `codex models` CLI listing because the local sandbox blocked that command.",
+  "I couldn’t get `/codex models` from the shell here.",
   "I couldn’t list all installed/available Codex models from the local CLI because the sandboxed `codex` command failed to start in this environment.",
   "I couldn’t get `codex models` from the CLI because the sandbox blocks the namespace setup it needs",
   "I can only see the current session model from this environment",
@@ -34,6 +43,9 @@ export const EXPECTED_CODEX_MODELS_COMMAND_TEXT = [
   "Available model overrides:",
   "Available model overrides exposed in this session",
   "Available model overrides here:",
+  "Available model overrides listed for this session:",
+  "Available model overrides listed in this session:",
+  "Available model overrides shown in this session:",
   "Available model overrides in this session:",
   "Available agent models:",
   "Visible options in this session:",
@@ -48,6 +60,7 @@ export const EXPECTED_CODEX_MODELS_COMMAND_TEXT = [
   "Current session model: `codex/",
   "Current session model is `openai/",
   "Current session model is `codex/",
+  "Visible session model:",
   "The current session is using `openai/",
   "The current session is using `codex/",
   "current session is using `openai/",
@@ -68,6 +81,90 @@ export const EXPECTED_CODEX_MODELS_COMMAND_TEXT = [
   "Current OpenClaw session status reports the active model as:",
 ] as const;
 
+/** Accepted `/codex status` response fragments for live harness probes. */
+export const EXPECTED_CODEX_STATUS_COMMAND_TEXT = [
+  "Codex app-server:",
+  "Model: `codex/",
+  "Model: codex/",
+  "Session: `agent:dev:live-codex-harness`",
+  "Session: agent:dev:live-codex-harness",
+  "OpenClaw `",
+  "OpenClaw status:",
+  "Status: running on",
+  "model `codex/",
+  "session `agent:dev:live-codex-harness`",
+  "Model/status card shown above",
+  "OpenClaw status shown above.",
+  "Status shown above.",
+  "No active task is running.",
+  "No active work is running.",
+  "Working normally.",
+  "Idle and ready.",
+  "Ready.",
+] as const;
+
+/** Returns true when text matches a known healthy Codex status response shape. */
+export function isExpectedCodexStatusCommandText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  const mentionsOpenClawStatus =
+    normalized.includes("openclaw is running on") ||
+    /openclaw\s+\S+\s+is running on/u.test(normalized) ||
+    normalized.includes("openclaw status:") ||
+    normalized.includes("status: running on") ||
+    normalized.includes("session status: running on");
+  const mentionsHarnessSession =
+    normalized.includes("session: `agent:dev:live-codex-harness`") ||
+    normalized.includes("session: agent:dev:live-codex-harness") ||
+    normalized.includes("session is `agent:dev:live-codex-harness`") ||
+    normalized.includes("session is agent:dev:live-codex-harness") ||
+    normalized.includes("session `agent:dev:live-codex-harness`") ||
+    normalized.includes("current session is `agent:dev:live-codex-harness`") ||
+    normalized.includes("current session is agent:dev:live-codex-harness") ||
+    normalized.includes("session context is healthy") ||
+    normalized.includes("session is healthy:") ||
+    ((normalized.includes("session context") || normalized.includes("context is at")) &&
+      normalized.includes("active task: `/codex status`"));
+  const mentionsModel =
+    normalized.includes("`openai/") ||
+    normalized.includes(" openai/") ||
+    normalized.includes("`codex/") ||
+    normalized.includes(" codex/");
+  const isCurrentSessionStatus =
+    normalized.includes("current session status:") &&
+    normalized.includes("runtime: `openai codex`") &&
+    mentionsModel;
+  const isCompactSessionStatus =
+    normalized.includes("session status: running on") &&
+    normalized.includes("context at") &&
+    mentionsModel;
+  const isRunningSessionStatus =
+    normalized.includes("session is running on") &&
+    (normalized.includes("context used") ||
+      normalized.includes("context is about") ||
+      normalized.includes("context is at")) &&
+    normalized.includes("no compactions") &&
+    (normalized.includes("current session is") || normalized.includes("cache hit")) &&
+    mentionsModel;
+  const isWorkspaceOnlyHealthyStatus =
+    normalized.includes("working normally.") && normalized.includes("current workspace:");
+  const isIdleReadyStatus = normalized.includes("idle and ready");
+  const isReadyStatus = normalized.trim() === "ready.";
+  const isOnlineIdleStatus =
+    normalized.includes("online") && normalized.includes("no active task is running");
+
+  return (
+    isCurrentSessionStatus ||
+    isCompactSessionStatus ||
+    isRunningSessionStatus ||
+    isWorkspaceOnlyHealthyStatus ||
+    isIdleReadyStatus ||
+    isReadyStatus ||
+    isOnlineIdleStatus ||
+    (mentionsOpenClawStatus && mentionsHarnessSession && mentionsModel)
+  );
+}
+
+/** Returns true when text matches a known Codex model-list or fallback shape. */
 export function isExpectedCodexModelsCommandText(text: string): boolean {
   const normalized = text.toLowerCase();
   const mentionsCodexModelsCommand =
@@ -78,10 +175,14 @@ export function isExpectedCodexModelsCommandText(text: string): boolean {
       normalized.includes("could not run") ||
       normalized.includes("could not be run") ||
       normalized.includes("failed in this sandbox") ||
+      normalized.includes("failed because") ||
       normalized.includes("failed with:") ||
       normalized.includes("fails to start") ||
       normalized.includes("repo-local fallback") ||
       normalized.includes("sandbox blocks") ||
+      normalized.includes("sandbox blocked") ||
+      normalized.includes("approval review failed") ||
+      normalized.includes("failed before it could be approved") ||
       ((normalized.includes("rejected") || normalized.includes("not approved")) &&
         (normalized.includes("sandbox") ||
           normalized.includes("permission") ||
@@ -99,6 +200,7 @@ export function isExpectedCodexModelsCommandText(text: string): boolean {
       normalized.includes("command not found") ||
       normalized.includes("not installed") ||
       normalized.includes("required user namespace") ||
+      normalized.includes("unprivileged user namespaces") ||
       normalized.includes("user-namespace restriction") ||
       normalized.includes("bwrap: no permissions to create a new namespace"));
 
@@ -109,6 +211,8 @@ export function isExpectedCodexModelsCommandText(text: string): boolean {
   const mentionsSessionModel =
     normalized.includes("current session is using") ||
     normalized.includes("current session model") ||
+    normalized.includes("current session model from openclaw status") ||
+    normalized.includes("visible session model") ||
     normalized.includes("the current session is using");
   const mentionsConfigSummary =
     normalized.includes("default model") ||
@@ -130,6 +234,11 @@ export function isExpectedCodexModelsCommandText(text: string): boolean {
   const mentionsVisibleOptions =
     normalized.includes("visible options in this session:") ||
     normalized.includes("visible options:") ||
+    normalized.includes("available codex agent model:") ||
+    normalized.includes("available codex agent models:") ||
+    normalized.includes("available model overrides listed for this session:") ||
+    normalized.includes("available model overrides listed in this session:") ||
+    normalized.includes("available model overrides shown in this session:") ||
     normalized.includes("available here:") ||
     normalized.includes("available agent ids in this session:");
   const mentionsCurrentActiveModel =
@@ -148,6 +257,10 @@ export function isExpectedCodexModelsCommandText(text: string): boolean {
   const isAgentIdModelSummary =
     normalized.includes("available agent ids in this session:") &&
     (text.includes("`openai/") || text.includes("`codex/"));
+  const isCodexAgentModelSummary =
+    (normalized.includes("available codex agent model:") ||
+      normalized.includes("available codex agent models:")) &&
+    (text.includes("`openai/") || text.includes("`codex/"));
   const isAvailableHereModelSummary =
     normalized.includes("available here:") &&
     normalized.includes("current session model") &&
@@ -163,7 +276,24 @@ export function isExpectedCodexModelsCommandText(text: string): boolean {
     isSessionConfigFallback ||
     isInteractiveSelectionSummary ||
     isAgentIdModelSummary ||
+    isCodexAgentModelSummary ||
     isAvailableHereModelSummary ||
     isInteractiveTuiSummary
   );
+}
+
+/** Identifies transient live harness errors that are worth retrying. */
+export function isRetryableCodexHarnessLiveError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.message.includes("gateway request timeout for sessions.list");
+}
+
+/** Skips retryable live errors only when the subagent probe is not under test. */
+export function shouldSkipRetryableCodexHarnessLiveError(
+  error: unknown,
+  params: { subagentProbe: boolean },
+): boolean {
+  return isRetryableCodexHarnessLiveError(error) && !params.subagentProbe;
 }

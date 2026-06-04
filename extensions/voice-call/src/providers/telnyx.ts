@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { TelnyxConfig } from "../config.js";
 import type {
+  AnswerCallInput,
   EndReason,
   GetCallStatusInput,
   GetCallStatusResult,
@@ -44,6 +45,18 @@ function normalizeTelnyxDirection(
     default:
       return undefined;
   }
+}
+
+function normalizeBase64ForCompare(value: string): string {
+  return value.replace(/=+$/u, "").replace(/-/gu, "+").replace(/_/gu, "/");
+}
+
+function decodeClientStateBase64(value: string): string | null {
+  const buffer = Buffer.from(value, "base64");
+  if (normalizeBase64ForCompare(buffer.toString("base64")) !== normalizeBase64ForCompare(value)) {
+    return null;
+  }
+  return buffer.toString("utf8");
 }
 
 export class TelnyxProvider implements VoiceCallProvider {
@@ -141,12 +154,7 @@ export class TelnyxProvider implements VoiceCallProvider {
     // Decode client_state from Base64 (we encode it in initiateCall)
     let callId = "";
     if (data.payload?.client_state) {
-      try {
-        callId = Buffer.from(data.payload.client_state, "base64").toString("utf8");
-      } catch {
-        // Fallback if not valid Base64
-        callId = data.payload.client_state;
-      }
+      callId = decodeClientStateBase64(data.payload.client_state) ?? data.payload.client_state;
     }
     if (!callId) {
       callId = data.payload?.call_control_id || "";
@@ -207,6 +215,10 @@ export class TelnyxProvider implements VoiceCallProvider {
           digits: data.payload?.digit || "",
         };
 
+      case "streaming.started":
+      case "streaming.stopped":
+        return null;
+
       default:
         return null;
     }
@@ -249,11 +261,8 @@ export class TelnyxProvider implements VoiceCallProvider {
     }
   }
 
-  /**
-   * Initiate an outbound call via Telnyx API.
-   */
   async initiateCall(input: InitiateCallInput): Promise<InitiateCallResult> {
-    const result = await this.apiRequest<TelnyxCallResponse>("/calls", {
+    const body: Record<string, unknown> = {
       connection_id: this.connectionId,
       to: input.to,
       from: input.from,
@@ -261,7 +270,11 @@ export class TelnyxProvider implements VoiceCallProvider {
       webhook_url_method: "POST",
       client_state: Buffer.from(input.callId).toString("base64"),
       timeout_secs: 30,
-    });
+      ...(input.streamUrl
+        ? buildTelnyxStreamingFields(input.streamUrl, input.streamAuthToken)
+        : {}),
+    };
+    const result = await this.apiRequest<TelnyxCallResponse>("/calls", body);
 
     return {
       providerCallId: result.data.call_control_id,
@@ -278,6 +291,16 @@ export class TelnyxProvider implements VoiceCallProvider {
       { command_id: crypto.randomUUID() },
       { allowNotFound: true },
     );
+  }
+
+  async answerCall(input: AnswerCallInput): Promise<void> {
+    const body: Record<string, unknown> = {
+      command_id: `openclaw-answer-${input.callId}`,
+      ...(input.streamUrl
+        ? buildTelnyxStreamingFields(input.streamUrl, input.streamAuthToken)
+        : {}),
+    };
+    await this.apiRequest(`/calls/${input.providerCallId}/actions/answer`, body);
   }
 
   /**
@@ -345,9 +368,21 @@ export class TelnyxProvider implements VoiceCallProvider {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Telnyx-specific types
-// -----------------------------------------------------------------------------
+function buildTelnyxStreamingFields(
+  streamUrl: string,
+  streamAuthToken: string | undefined,
+): Record<string, unknown> {
+  return {
+    stream_url: streamUrl,
+    stream_track: "inbound_track",
+    stream_codec: "PCMU",
+    stream_bidirectional_mode: "rtp",
+    stream_bidirectional_codec: "PCMU",
+    stream_bidirectional_sampling_rate: 8000,
+    stream_bidirectional_target_legs: "self",
+    ...(streamAuthToken ? { stream_auth_token: streamAuthToken } : {}),
+  };
+}
 
 interface TelnyxEvent {
   id?: string;

@@ -18,11 +18,13 @@ import type { ChannelRuntimeSurface } from "./channel-runtime-surface.types.js";
 import type { ConfigWriteTarget } from "./config-writes.js";
 export type {
   ChannelOutboundAdapter,
+  ChannelOutboundChunkContext,
   ChannelOutboundContext,
   ChannelOutboundFormattedContext,
   ChannelOutboundPayloadContext,
   ChannelOutboundPayloadHint,
   ChannelOutboundTargetRef,
+  ChannelDeliveryCapabilities,
 } from "./outbound.types.js";
 import type {
   ChannelAccountSnapshot,
@@ -246,9 +248,8 @@ export type ChannelGatewayContext<ResolvedAccount = unknown> = {
   /**
    * Optional channel runtime helpers for external channel plugins.
    *
-   * This field provides access to advanced Plugin SDK features that are
-   * available to external plugins but not to built-in channels (which can
-   * directly import internal modules).
+   * This field provides the canonical channel runtime helpers for channel
+   * dispatch, routing, session, reply, and startup context work.
    *
    * ## Available Features
    *
@@ -263,7 +264,7 @@ export type ChannelGatewayContext<ResolvedAccount = unknown> = {
    *
    * ## Use Cases
    *
-   * External channel plugins (e.g., email, SMS, custom integrations) that need:
+   * Channel plugins that need:
    * - AI-powered response generation and delivery
    * - Advanced text processing and formatting
    * - Session tracking and management
@@ -297,11 +298,9 @@ export type ChannelGatewayContext<ResolvedAccount = unknown> = {
    * ## Backward Compatibility
    *
    * - This field is **optional** - channels that don't need it can ignore it
-   * - Bundled channels typically don't use this field
-   *   because they can directly import internal modules
+   * - Gateway startup passes a full `createPluginRuntime().channel` surface
+   *   when a runtime resolver is configured
    * - External plugins should check for undefined before using
-   * - When provided, this must be a full `createPluginRuntime().channel` surface;
-   *   partial stubs are not supported
    *
    * @since Plugin SDK 2026.2.19
    * @see {@link https://docs.openclaw.ai/plugins/building-plugins | Plugin SDK documentation}
@@ -324,6 +323,7 @@ export type ChannelLoginWithQrStartResult = {
 export type ChannelLoginWithQrWaitResult = {
   connected: boolean;
   message: string;
+  qrDataUrl?: string;
 };
 
 export type ChannelLogoutContext<ResolvedAccount = unknown> = {
@@ -348,6 +348,7 @@ export type ChannelGatewayAdapter<ResolvedAccount = unknown> = {
   loginWithQrWait?: (params: {
     accountId?: string;
     timeoutMs?: number;
+    currentQrDataUrl?: string;
   }) => Promise<ChannelLoginWithQrWaitResult>;
   logoutAccount?: (ctx: ChannelLogoutContext<ResolvedAccount>) => Promise<ChannelLogoutResult>;
 };
@@ -382,13 +383,6 @@ export type ChannelHeartbeatAdapter = {
     threadId?: string | number | null;
     deps?: ChannelHeartbeatDeps;
   }) => Promise<void> | void;
-  resolveRecipients?: (params: {
-    cfg: OpenClawConfig;
-    opts?: { to?: string; all?: boolean; accountId?: string };
-  }) => {
-    recipients: string[];
-    source: string;
-  };
 };
 
 type ChannelDirectorySelfParams = {
@@ -519,6 +513,7 @@ export type ChannelDoctorAdapter = {
   collectPreviewWarnings?: (params: {
     cfg: OpenClawConfig;
     doctorFixCommand: string;
+    env?: NodeJS.ProcessEnv;
   }) => string[] | Promise<string[]>;
   collectMutableAllowlistWarnings?: (params: {
     cfg: OpenClawConfig;
@@ -579,7 +574,7 @@ export type ChannelApprovalDeliveryAdapter = {
     cfg: OpenClawConfig;
     approvalKind: ChannelApprovalKind;
     target: ChannelApprovalForwardTarget;
-    request: ExecApprovalRequest;
+    request: ExecApprovalRequest | PluginApprovalRequest;
   }) => boolean;
 };
 export type ChannelApproveCommandBehavior =

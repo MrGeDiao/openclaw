@@ -1,6 +1,7 @@
+import type { MediaNormalizationEntry } from "../../packages/media-generation-core/src/normalization.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import type { MediaNormalizationEntry } from "../media-generation/normalization.types.js";
+import type { SsrFPolicy } from "../infra/net/ssrf.js";
 
 export type GeneratedImageAsset = {
   buffer: Buffer;
@@ -16,7 +17,9 @@ export type ImageGenerationQuality = "low" | "medium" | "high" | "auto";
 
 export type ImageGenerationOutputFormat = "png" | "jpeg" | "webp";
 
-export type ImageGenerationOpenAIBackground = "transparent" | "opaque" | "auto";
+export type ImageGenerationBackground = "transparent" | "opaque" | "auto";
+
+export type ImageGenerationOpenAIBackground = ImageGenerationBackground;
 
 export type ImageGenerationOpenAIModeration = "low" | "auto";
 
@@ -27,16 +30,17 @@ export type ImageGenerationOpenAIOptions = {
   user?: string;
 };
 
-export type ImageGenerationProviderOptions = {
+export type ImageGenerationProviderOptions = Record<string, unknown> & {
   openai?: ImageGenerationOpenAIOptions;
 };
 
-export type ImageGenerationIgnoredOverrideKey =
+type ImageGenerationIgnoredOverrideKey =
   | "size"
   | "aspectRatio"
   | "resolution"
   | "quality"
-  | "outputFormat";
+  | "outputFormat"
+  | "background";
 
 export type ImageGenerationIgnoredOverride = {
   key: ImageGenerationIgnoredOverrideKey;
@@ -69,8 +73,10 @@ export type ImageGenerationRequest = {
   resolution?: ImageGenerationResolution;
   quality?: ImageGenerationQuality;
   outputFormat?: ImageGenerationOutputFormat;
+  background?: ImageGenerationBackground;
   inputImages?: ImageGenerationSourceImage[];
   providerOptions?: ImageGenerationProviderOptions;
+  ssrfPolicy?: SsrFPolicy;
 };
 
 export type ImageGenerationResult = {
@@ -79,27 +85,31 @@ export type ImageGenerationResult = {
   metadata?: Record<string, unknown>;
 };
 
-export type ImageGenerationModeCapabilities = {
+type ImageGenerationModeCapabilities = {
   maxCount?: number;
   supportsSize?: boolean;
   supportsAspectRatio?: boolean;
   supportsResolution?: boolean;
 };
 
-export type ImageGenerationEditCapabilities = ImageGenerationModeCapabilities & {
+type ImageGenerationEditCapabilities = ImageGenerationModeCapabilities & {
   enabled: boolean;
   maxInputImages?: number;
 };
 
-export type ImageGenerationGeometryCapabilities = {
+type ImageGenerationGeometryCapabilities = {
   sizes?: string[];
+  sizesByModel?: Record<string, string[]>;
   aspectRatios?: string[];
+  aspectRatiosByModel?: Record<string, string[]>;
   resolutions?: ImageGenerationResolution[];
+  resolutionsByModel?: Record<string, ImageGenerationResolution[]>;
 };
 
-export type ImageGenerationOutputCapabilities = {
+type ImageGenerationOutputCapabilities = {
   qualities?: ImageGenerationQuality[];
   formats?: ImageGenerationOutputFormat[];
+  backgrounds?: ImageGenerationBackground[];
 };
 
 export type ImageGenerationNormalization = {
@@ -120,6 +130,8 @@ export type ImageGenerationProvider = {
   aliases?: string[];
   label?: string;
   defaultModel?: string;
+  /** Default provider operation timeout in milliseconds when caller/config omit timeoutMs. */
+  defaultTimeoutMs?: number;
   models?: string[];
   capabilities: ImageGenerationProviderCapabilities;
   isConfigured?: (ctx: ImageGenerationProviderConfiguredContext) => boolean;

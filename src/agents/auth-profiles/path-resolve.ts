@@ -2,35 +2,36 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { resolveStateDir } from "../../config/paths.js";
 import { resolveUserPath } from "../../utils.js";
-import { resolveOpenClawAgentDir } from "../agent-paths.js";
+import { resolveDefaultAgentDir } from "../agent-scope-config.js";
 import {
   AUTH_PROFILE_FILENAME,
   AUTH_STATE_FILENAME,
   LEGACY_AUTH_FILENAME,
 } from "./path-constants.js";
+import { resolveAuthProfileDatabasePath } from "./sqlite.js";
 
 export function resolveAuthStorePath(agentDir?: string): string {
-  const resolved = resolveUserPath(agentDir ?? resolveOpenClawAgentDir());
+  const resolved = resolveUserPath(agentDir ?? resolveDefaultAgentDir({}));
   return path.join(resolved, AUTH_PROFILE_FILENAME);
 }
 
 export function resolveLegacyAuthStorePath(agentDir?: string): string {
-  const resolved = resolveUserPath(agentDir ?? resolveOpenClawAgentDir());
+  const resolved = resolveUserPath(agentDir ?? resolveDefaultAgentDir({}));
   return path.join(resolved, LEGACY_AUTH_FILENAME);
 }
 
 export function resolveAuthStatePath(agentDir?: string): string {
-  const resolved = resolveUserPath(agentDir ?? resolveOpenClawAgentDir());
+  const resolved = resolveUserPath(agentDir ?? resolveDefaultAgentDir({}));
   return path.join(resolved, AUTH_STATE_FILENAME);
 }
 
 export function resolveAuthStorePathForDisplay(agentDir?: string): string {
-  const pathname = resolveAuthStorePath(agentDir);
+  const pathname = resolveAuthProfileDatabasePath(agentDir);
   return pathname.startsWith("~") ? pathname : resolveUserPath(pathname);
 }
 
 export function resolveAuthStatePathForDisplay(agentDir?: string): string {
-  const pathname = resolveAuthStatePath(agentDir);
+  const pathname = resolveAuthProfileDatabasePath(agentDir);
   return pathname.startsWith("~") ? pathname : resolveUserPath(pathname);
 }
 
@@ -53,6 +54,9 @@ export function resolveAuthStatePathForDisplay(agentDir?: string): string {
  */
 export function resolveOAuthRefreshLockPath(provider: string, profileId: string): string {
   const hash = createHash("sha256");
+  // This hashes provider/profile identifiers into a path-safe lock name; it is
+  // not password storage or credential verification.
+  // codeql[js/insufficient-password-hash]
   hash.update(provider, "utf8");
   hash.update("\u0000", "utf8"); // NUL separator: unambiguous boundary.
   hash.update(profileId, "utf8");

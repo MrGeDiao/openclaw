@@ -7,7 +7,7 @@ const resolveProviderUsageSnapshotWithPluginMock = vi.hoisted(() =>
 );
 
 vi.mock("../config/config.js", () => ({
-  loadConfig: () => ({}),
+  getRuntimeConfig: () => ({}),
 }));
 
 vi.mock("../plugins/provider-runtime.js", async () => {
@@ -20,6 +20,7 @@ vi.mock("../plugins/provider-runtime.js", async () => {
   };
 });
 
+/** Resets the plugin-backed provider usage mock to the default no-snapshot behavior. */
 export function resetProviderUsageSnapshotWithPluginMock() {
   resolveProviderUsageSnapshotWithPluginMock.mockReset();
   resolveProviderUsageSnapshotWithPluginMock.mockResolvedValue(null);

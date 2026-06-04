@@ -1,13 +1,20 @@
-import { completeSimple, type Api, type AssistantMessage, type Model } from "@mariozechner/pi-ai";
-import { loadConfig } from "../config/config.js";
+import { getRuntimeConfig } from "../config/config.js";
 import { isTruthyEnvValue } from "../infra/env.js";
-import { resolveOpenClawAgentDir } from "./agent-paths.js";
+import { parseStrictInteger } from "../infra/parse-finite-number.js";
+import { completeSimple } from "../llm/stream.js";
+import type { Api, AssistantMessage, Model } from "../llm/types.js";
+import { discoverAuthStorage, discoverModels } from "./agent-model-discovery.js";
+import { resolveDefaultAgentDir } from "./agent-scope.js";
 import { collectProviderApiKeys } from "./live-auth-keys.js";
 import { isLiveTestEnabled } from "./live-test-helpers.js";
-import { getApiKeyForModel, requireApiKey } from "./model-auth.js";
+import {
+  getApiKeyForModel,
+  isMissingProviderAuthError,
+  isProviderAuthError,
+  requireApiKey,
+} from "./model-auth.js";
 import { normalizeProviderId, parseModelRef } from "./model-selection.js";
 import { ensureOpenClawModelsJson } from "./models-config.js";
-import { discoverAuthStorage, discoverModels } from "./pi-model-discovery.js";
 import { buildAssistantMessageWithZeroUsage } from "./stream-message-shared.js";
 
 export const LIVE_CACHE_TEST_ENABLED =
@@ -16,18 +23,46 @@ export const LIVE_CACHE_TEST_ENABLED =
 const DEFAULT_HEARTBEAT_MS = 20_000;
 const DEFAULT_TIMEOUT_MS = 90_000;
 
-type LiveResolvedModel = {
+export type LiveResolvedModel = {
   apiKey: string;
-  model: Model<Api>;
+  model: Model;
 };
+
+export type LiveResolvedModelPool = {
+  apiKeys: string[];
+  fixture: LiveResolvedModel;
+};
+
+export class LiveCachePrerequisiteSkip extends Error {
+  constructor(
+    readonly provider: "anthropic" | "openai",
+    reason: string,
+  ) {
+    super(reason);
+    this.name = "LiveCachePrerequisiteSkip";
+  }
+}
+
+export function isLiveCachePrerequisiteSkip(error: unknown): error is LiveCachePrerequisiteSkip {
+  return error instanceof LiveCachePrerequisiteSkip;
+}
+
+export function toLiveCachePrerequisiteSkip(
+  provider: "anthropic" | "openai",
+  error: unknown,
+): LiveCachePrerequisiteSkip | undefined {
+  if (isMissingProviderAuthError(error) || isProviderAuthError(error, "missing-provider-auth")) {
+    return new LiveCachePrerequisiteSkip(provider, error.message);
+  }
+  return undefined;
+}
 
 function toInt(value: string | undefined, fallback: number): number {
   const trimmed = value?.trim();
   if (!trimmed) {
     return fallback;
   }
-  const parsed = Number.parseInt(trimmed, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  return parseStrictInteger(trimmed) ?? fallback;
 }
 
 export function logLiveCache(message: string): void {
@@ -126,7 +161,7 @@ export function extractAssistantText(message: AssistantMessage): string {
 
 export function buildAssistantHistoryTurn(
   text: string,
-  model?: Pick<Model<Api>, "api" | "provider" | "id">,
+  model?: Pick<Model, "api" | "provider" | "id">,
 ): AssistantMessage {
   return buildAssistantMessageWithZeroUsage({
     model: {
@@ -155,48 +190,75 @@ export function computeCacheHitRate(usage: {
   return cacheRead / totalPrompt;
 }
 
-export async function resolveLiveDirectModel(params: {
+export async function resolveLiveDirectModelPool(params: {
   provider: "anthropic" | "openai";
   api: "anthropic-messages" | "openai-responses";
   envVar: string;
   preferredModelIds: readonly string[];
-}): Promise<LiveResolvedModel> {
-  const cfg = loadConfig();
+}): Promise<LiveResolvedModelPool> {
+  const cfg = getRuntimeConfig();
   await ensureOpenClawModelsJson(cfg);
-  const agentDir = resolveOpenClawAgentDir();
+  const agentDir = resolveDefaultAgentDir(cfg);
   const authStorage = discoverAuthStorage(agentDir);
   const models = discoverModels(authStorage, agentDir).getAll();
-
-  const rawModel = process.env[params.envVar]?.trim();
-  const parsed = rawModel ? parseModelRef(rawModel, params.provider) : null;
   const candidates = models.filter(
     (model) => normalizeProviderId(model.provider) === params.provider && model.api === params.api,
   );
-
-  let resolvedModel: Model<Api> | undefined;
-  if (parsed) {
-    resolvedModel = candidates.find(
-      (model) =>
-        normalizeProviderId(model.provider) === parsed.provider && model.id === parsed.model,
-    );
-  }
-  if (!resolvedModel) {
-    resolvedModel = params.preferredModelIds
+  const rawModel = process.env[params.envVar]?.trim();
+  const parsed = rawModel ? parseModelRef(rawModel, params.provider) : null;
+  const requestedModelId =
+    parsed && normalizeProviderId(parsed.provider) === params.provider ? parsed.model : rawModel;
+  const selectModel = (): Model | undefined => {
+    if (parsed) {
+      return candidates.find(
+        (model) =>
+          normalizeProviderId(model.provider) === parsed.provider && model.id === parsed.model,
+      );
+    }
+    if (requestedModelId) {
+      return candidates.find((model) => model.id === requestedModelId);
+    }
+    return params.preferredModelIds
       .map((id) => candidates.find((model) => model.id === id))
       .find(Boolean);
-  }
-  if (!resolvedModel) {
-    throw new Error(
-      rawModel
-        ? `Model not found for ${params.provider}: ${rawModel}`
-        : `No ${params.provider} ${params.api} model available in registry.`,
-    );
+  };
+  const liveKeys = collectProviderApiKeys(params.provider);
+  if (liveKeys.length > 0) {
+    const selectedModel = selectModel();
+    if (!selectedModel || selectedModel.api !== params.api) {
+      const message = requestedModelId
+        ? `Model not found for ${params.provider}: ${requestedModelId}`
+        : `No built-in ${params.provider} ${params.api} model available.`;
+      if (requestedModelId) {
+        throw new Error(message);
+      }
+      throw new LiveCachePrerequisiteSkip(params.provider, message);
+    }
+    logLiveCache(`resolved ${params.provider} model ${selectedModel.id} from live env key`);
+    return {
+      apiKeys: liveKeys,
+      fixture: {
+        model: selectedModel,
+        apiKey: liveKeys[0] ?? "",
+      },
+    };
   }
 
-  const liveKeys = collectProviderApiKeys(params.provider);
-  const apiKey =
-    liveKeys[0] ??
-    requireApiKey(
+  logLiveCache(`resolving ${params.provider} model from configured auth storage`);
+  const resolvedModel = selectModel();
+  if (!resolvedModel) {
+    const message = rawModel
+      ? `Model not found for ${params.provider}: ${rawModel}`
+      : `No ${params.provider} ${params.api} model available in registry.`;
+    if (rawModel) {
+      throw new Error(message);
+    }
+    throw new LiveCachePrerequisiteSkip(params.provider, message);
+  }
+
+  let apiKey: string;
+  try {
+    apiKey = requireApiKey(
       await getApiKeyForModel({
         model: resolvedModel,
         cfg,
@@ -204,8 +266,34 @@ export async function resolveLiveDirectModel(params: {
       }),
       resolvedModel.provider,
     );
+  } catch (error) {
+    const skip = toLiveCachePrerequisiteSkip(params.provider, error);
+    if (skip) {
+      throw skip;
+    }
+    throw error;
+  }
+  logLiveCache(
+    `resolved ${params.provider} model ${resolvedModel.id} from configured auth storage`,
+  );
   return {
-    model: resolvedModel,
-    apiKey,
+    apiKeys: [apiKey],
+    fixture: {
+      model: resolvedModel,
+      apiKey,
+    },
   };
+}
+
+export async function resolveLiveDirectModel(
+  params: Parameters<typeof resolveLiveDirectModelPool>[0],
+): Promise<LiveResolvedModel> {
+  return (await resolveLiveDirectModelPool(params)).fixture;
+}
+
+export function withLiveDirectModelApiKey(
+  fixture: LiveResolvedModel,
+  apiKey: string,
+): LiveResolvedModel {
+  return { ...fixture, apiKey };
 }

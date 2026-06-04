@@ -1,3 +1,6 @@
+/**
+ * Tests web.start gateway method behavior and backend launch responses.
+ */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelRuntimeSnapshot } from "../server-channel-runtime.types.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
@@ -12,6 +15,25 @@ vi.mock("../../channels/plugins/index.js", () => ({
 
 import { webHandlers } from "./web.js";
 
+function createRunningWhatsappSnapshot(): ChannelRuntimeSnapshot {
+  return {
+    channels: {
+      whatsapp: {
+        accountId: "default",
+        running: true,
+      },
+    },
+    channelAccounts: {
+      whatsapp: {
+        default: {
+          accountId: "default",
+          running: true,
+        },
+      },
+    },
+  };
+}
+
 function createOptions(
   params: Record<string, unknown>,
   overrides?: Partial<GatewayRequestHandlerOptions>,
@@ -25,24 +47,7 @@ function createOptions(
     context: {
       stopChannel: vi.fn(),
       startChannel: vi.fn(),
-      getRuntimeSnapshot: vi.fn(
-        (): ChannelRuntimeSnapshot => ({
-          channels: {
-            whatsapp: {
-              accountId: "default",
-              running: true,
-            },
-          },
-          channelAccounts: {
-            whatsapp: {
-              default: {
-                accountId: "default",
-                running: true,
-              },
-            },
-          },
-        }),
-      ),
+      getRuntimeSnapshot: vi.fn(createRunningWhatsappSnapshot),
     },
     ...overrides,
   } as unknown as GatewayRequestHandlerOptions;
@@ -57,24 +62,7 @@ function createRunningWhatsappContext() {
     context: {
       stopChannel,
       startChannel,
-      getRuntimeSnapshot: vi.fn(
-        (): ChannelRuntimeSnapshot => ({
-          channels: {
-            whatsapp: {
-              accountId: "default",
-              running: true,
-            },
-          },
-          channelAccounts: {
-            whatsapp: {
-              default: {
-                accountId: "default",
-                running: true,
-              },
-            },
-          },
-        }),
-      ),
+      getRuntimeSnapshot: vi.fn(createRunningWhatsappSnapshot),
     } as unknown as GatewayRequestHandlerOptions["context"],
   };
 }
@@ -146,5 +134,110 @@ describe("webHandlers web.login.start", () => {
 
     expect(stopChannel).toHaveBeenCalledWith("whatsapp", "default");
     expect(startChannel).not.toHaveBeenCalled();
+  });
+
+  it("preserves gateway method receiver state for login start", async () => {
+    const gateway = {
+      marker: "gateway-state",
+      async loginWithQrStart(this: { marker: string }) {
+        return {
+          connected: true,
+          message: this.marker,
+        };
+      },
+    };
+    const loginWithQrStart = vi.spyOn(gateway, "loginWithQrStart");
+    mocks.listChannelPlugins.mockReturnValue([
+      {
+        id: "whatsapp",
+        gatewayMethods: ["web.login.start"],
+        gateway,
+      },
+    ]);
+    const respond = vi.fn();
+
+    await webHandlers["web.login.start"](
+      createOptions(
+        { accountId: "default" },
+        {
+          respond,
+        },
+      ),
+    );
+
+    expect(loginWithQrStart).toHaveBeenCalledWith({
+      accountId: "default",
+      force: false,
+      timeoutMs: undefined,
+      verbose: false,
+    });
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      {
+        connected: true,
+        message: "gateway-state",
+      },
+      undefined,
+    );
+  });
+});
+
+describe("webHandlers web.login.wait", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("passes refreshed QR payloads back to the client while login is still pending", async () => {
+    const loginWithQrWait = vi.fn().mockResolvedValue({
+      connected: false,
+      message: "QR refreshed. Scan the latest code in WhatsApp → Linked Devices.",
+      qrDataUrl: "data:image/png;base64,next-qr",
+    });
+    mocks.listChannelPlugins.mockReturnValue([
+      {
+        id: "whatsapp",
+        gatewayMethods: ["web.login.wait"],
+        gateway: { loginWithQrWait },
+      },
+    ]);
+    const respond = vi.fn();
+
+    await webHandlers["web.login.wait"](
+      createOptions(
+        {
+          accountId: "default",
+          timeoutMs: 5000,
+          currentQrDataUrl: "data:image/png;base64,current-qr",
+        },
+        {
+          req: {
+            type: "req",
+            id: "req-2",
+            method: "web.login.wait",
+            params: {
+              accountId: "default",
+              timeoutMs: 5000,
+              currentQrDataUrl: "data:image/png;base64,current-qr",
+            },
+          } as GatewayRequestHandlerOptions["req"],
+          respond,
+        },
+      ),
+    );
+
+    expect(loginWithQrWait).toHaveBeenCalledWith({
+      accountId: "default",
+      timeoutMs: 5000,
+      currentQrDataUrl: "data:image/png;base64,current-qr",
+    });
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      {
+        connected: false,
+        message: "QR refreshed. Scan the latest code in WhatsApp → Linked Devices.",
+        qrDataUrl: "data:image/png;base64,next-qr",
+      },
+      undefined,
+    );
   });
 });

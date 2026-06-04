@@ -4,6 +4,7 @@ type SchemaParseResult<TData = unknown> =
   | { success: true; data: TData }
   | { success: false; error: { issues: Array<{ path: PropertyKey[]; message?: string }> } };
 
+/** Asserts a schema accepts config and exposes the expected normalized value. */
 export function expectSchemaConfigValue(params: {
   schema: { safeParse: (value: unknown) => SchemaParseResult };
   config: unknown;
@@ -24,21 +25,4 @@ export function expectSchemaValid(
 ) {
   const res = schema.safeParse(config);
   expect(res.success).toBe(true);
-}
-
-export function expectSchemaValidationIssue(params: {
-  schema: { safeParse: (value: unknown) => SchemaParseResult };
-  config: unknown;
-  expectedPath: string;
-  expectedMessage?: string;
-}) {
-  const res = params.schema.safeParse(params.config);
-  expect(res.success).toBe(false);
-  if (!res.success) {
-    const issue = res.error.issues[0];
-    expect(issue?.path.join(".")).toBe(params.expectedPath);
-    if (params.expectedMessage !== undefined) {
-      expect(issue?.message).toContain(params.expectedMessage);
-    }
-  }
 }

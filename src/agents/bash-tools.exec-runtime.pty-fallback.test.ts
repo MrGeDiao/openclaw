@@ -1,4 +1,10 @@
 import { afterEach, beforeAll, beforeEach, expect, test, vi } from "vitest";
+import {
+  onInternalDiagnosticEvent,
+  resetDiagnosticEventsForTest,
+  type DiagnosticExecProcessCompletedEvent,
+  type DiagnosticEventPayload,
+} from "../infra/diagnostic-events.js";
 import type { ManagedRun, SpawnInput } from "../process/supervisor/index.js";
 
 let listRunningSessions: typeof import("./bash-process-registry.js").listRunningSessions;
@@ -56,6 +62,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetProcessRegistryForTests();
+  resetDiagnosticEventsForTest();
   vi.clearAllMocks();
 });
 
@@ -73,6 +80,14 @@ function runPtyFallback(warnings: string[] = []) {
   });
 }
 
+function spawnInput(index: number): SpawnInput {
+  const call = supervisorSpawnMock.mock.calls[index] as [SpawnInput] | undefined;
+  if (!call) {
+    throw new Error(`expected supervisor spawn call ${index}`);
+  }
+  return call[0];
+}
+
 test("exec falls back when PTY spawn fails", async () => {
   supervisorSpawnMock
     .mockRejectedValueOnce(new Error("pty spawn failed"))
@@ -85,11 +100,8 @@ test("exec falls back when PTY spawn fails", async () => {
   expect(outcome.status).toBe("completed");
   expect(outcome.aggregated).toContain("ok");
   expect(warnings.join("\n")).toContain("PTY spawn failed");
-  expect(supervisorSpawnMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ mode: "pty" }));
-  expect(supervisorSpawnMock).toHaveBeenNthCalledWith(
-    2,
-    expect.objectContaining({ mode: "child" }),
-  );
+  expect(spawnInput(0).mode).toBe("pty");
+  expect(spawnInput(1).mode).toBe("child");
 });
 
 test("exec cleans session state when PTY fallback spawn also fails", async () => {
@@ -100,4 +112,59 @@ test("exec cleans session state when PTY fallback spawn also fails", async () =>
   await expect(runPtyFallback()).rejects.toThrow("child fallback failed");
 
   expect(listRunningSessions()).toHaveLength(0);
+});
+
+function flushDiagnosticEvents() {
+  return new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
+test("exec emits bounded process diagnostics without command text", async () => {
+  supervisorSpawnMock.mockImplementationOnce(async (input: SpawnInput) =>
+    createSuccessfulRun(input),
+  );
+  const events: DiagnosticEventPayload[] = [];
+  const unsubscribe = onInternalDiagnosticEvent((event) => {
+    events.push(event);
+  });
+  try {
+    const command = "printf super-secret-value";
+    const handle = await runExecProcess({
+      command,
+      workdir: process.cwd(),
+      env: {},
+      usePty: false,
+      warnings: [],
+      maxOutput: 20_000,
+      pendingMaxOutput: 20_000,
+      notifyOnExit: false,
+      sessionKey: "session-1",
+      timeoutSec: 5,
+    });
+
+    await handle.promise;
+    await flushDiagnosticEvents();
+
+    const event = events.find(
+      (item): item is DiagnosticExecProcessCompletedEvent => item.type === "exec.process.completed",
+    );
+    if (!event) {
+      throw new Error("Expected exec process completed event");
+    }
+    expect(event.type).toBe("exec.process.completed");
+    expect(event.target).toBe("host");
+    expect(event.mode).toBe("child");
+    expect(event.outcome).toBe("completed");
+    expect(typeof event?.durationMs).toBe("number");
+    expect(event?.commandLength).toBe(command.length);
+    expect(event?.exitCode).toBe(0);
+    expect(event?.sessionKey).toBe("session-1");
+    const serialized = JSON.stringify(event);
+    expect(serialized).not.toContain("printf");
+    expect(serialized).not.toContain("super-secret-value");
+    expect(serialized).not.toContain(process.cwd());
+  } finally {
+    unsubscribe();
+  }
 });

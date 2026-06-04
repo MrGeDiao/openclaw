@@ -21,6 +21,7 @@ For local integrations only, the Gateway exposes a small loopback HTTP API:
 - Actions: `POST /navigate`, `POST /act`
 - Hooks: `POST /hooks/file-chooser`, `POST /hooks/dialog`
 - Downloads: `POST /download`, `POST /wait/download`
+- Permissions: `POST /permissions/grant`
 - Debugging: `GET /console`, `POST /pdf`
 - Debugging: `GET /errors`, `GET /requests`, `POST /trace/start`, `POST /trace/stop`, `POST /highlight`
 - Network: `POST /response/body`
@@ -28,7 +29,15 @@ For local integrations only, the Gateway exposes a small loopback HTTP API:
 - State: `GET /storage/:kind`, `POST /storage/:kind/set`, `POST /storage/:kind/clear`
 - Settings: `POST /set/offline`, `POST /set/headers`, `POST /set/credentials`, `POST /set/geolocation`, `POST /set/media`, `POST /set/timezone`, `POST /set/locale`, `POST /set/device`
 
-All endpoints accept `?profile=<name>`.
+All endpoints accept `?profile=<name>`. `POST /start?headless=true` requests a
+one-shot headless launch for local managed profiles without changing persisted
+browser config; attach-only, remote CDP, and existing-session profiles reject
+that override because OpenClaw does not launch those browser processes.
+
+For tab endpoints, `targetId` is the compatibility field name. Prefer passing
+`suggestedTargetId` from `GET /tabs` or `POST /tabs/open`; labels and `tabId`
+handles such as `t1` are also accepted. Raw CDP target ids and unique raw
+target-id prefixes still work, but they are volatile diagnostic handles.
 
 If shared-secret gateway auth is configured, browser HTTP routes require auth too:
 
@@ -66,12 +75,16 @@ Other runtime failures may still return `{ "error": "<message>" }` without a
 ### Playwright requirement
 
 Some features (navigate/act/AI snapshot/role snapshot, element screenshots,
-PDF) require Playwright. If Playwright isn’t installed, those endpoints return
+PDF) require Playwright. If Playwright isn't installed, those endpoints return
 a clear 501 error.
 
 What still works without Playwright:
 
 - ARIA snapshots
+- Role-style accessibility snapshots (`--interactive`, `--compact`,
+  `--depth`, `--efficient`) when a per-tab CDP WebSocket is available. This is
+  a fallback for inspection and ref discovery; Playwright remains the primary
+  action engine.
 - Page screenshots for the managed `openclaw` browser when a per-tab CDP
   WebSocket is available
 - Page screenshots for `existing-session` / Chrome MCP profiles
@@ -81,22 +94,28 @@ What still needs Playwright:
 
 - `navigate`
 - `act`
-- AI snapshots / role snapshots
+- AI snapshots that depend on Playwright's native AI snapshot format
 - CSS-selector element screenshots (`--element`)
 - full browser PDF export
 
 Element screenshots also reject `--full-page`; the route returns `fullPage is
 not supported for element screenshots`.
 
-If you see `Playwright is not available in this gateway build`, repair the
-bundled browser plugin runtime dependencies so `playwright-core` is installed,
-then restart the gateway. For packaged installs, run `openclaw doctor --fix`.
-For Docker, also install the Chromium browser binaries as shown below.
+If you see `Playwright is not available in this gateway build`, the packaged
+Gateway is missing the core browser runtime dependency. Reinstall or update
+OpenClaw, then restart the gateway. For Docker, also install the Chromium
+browser binaries as shown below.
 
 #### Docker Playwright install
 
 If your Gateway runs in Docker, avoid `npx playwright` (npm override conflicts).
-Use the bundled CLI instead:
+For custom images, bake Chromium into the image:
+
+```bash
+OPENCLAW_INSTALL_BROWSER=1 ./scripts/docker/setup.sh
+```
+
+For an existing image, install through the bundled CLI instead:
 
 ```bash
 docker compose run --rm openclaw-cli \
@@ -105,7 +124,8 @@ docker compose run --rm openclaw-cli \
 
 To persist browser downloads, set `PLAYWRIGHT_BROWSERS_PATH` (for example,
 `/home/node/.cache/ms-playwright`) and make sure `/home/node` is persisted via
-`OPENCLAW_HOME_VOLUME` or a bind mount. See [Docker](/install/docker).
+`OPENCLAW_HOME_VOLUME` or a bind mount. OpenClaw auto-detects the persisted
+Chromium on Linux. See [Docker](/install/docker).
 
 ## How it works (internal)
 
@@ -122,6 +142,7 @@ All commands accept `--browser-profile <name>` to target a specific profile, and
 ```bash
 openclaw browser status
 openclaw browser start
+openclaw browser start --headless # one-shot local managed headless launch
 openclaw browser stop            # also clears emulation on attach-only/remote CDP
 openclaw browser tabs
 openclaw browser tab             # shortcut for current tab
@@ -141,11 +162,13 @@ openclaw browser close abcd1234
 openclaw browser screenshot
 openclaw browser screenshot --full-page
 openclaw browser screenshot --ref 12        # or --ref e12
+openclaw browser screenshot --labels
 openclaw browser snapshot
 openclaw browser snapshot --format aria --limit 200
 openclaw browser snapshot --interactive --compact --depth 6
 openclaw browser snapshot --efficient
 openclaw browser snapshot --labels
+openclaw browser snapshot --urls
 openclaw browser snapshot --selector "#main" --interactive
 openclaw browser snapshot --frame "iframe#main" --interactive
 openclaw browser console --level error
@@ -163,6 +186,7 @@ openclaw browser responsebody "**/api" --max-chars 5000
 openclaw browser navigate https://example.com
 openclaw browser resize 1280 720
 openclaw browser click 12 --double           # or e12 for role refs
+openclaw browser click-coords 120 340        # viewport coordinates
 openclaw browser type 23 "hello" --submit
 openclaw browser press Enter
 openclaw browser hover 44
@@ -172,11 +196,14 @@ openclaw browser select 9 OptionA OptionB
 openclaw browser download e12 report.pdf
 openclaw browser waitfordownload report.pdf
 openclaw browser upload /tmp/openclaw/uploads/file.pdf
+openclaw browser upload media://inbound/file.pdf
 openclaw browser fill --fields '[{"ref":"1","type":"text","value":"Ada"}]'
 openclaw browser dialog --accept
+openclaw browser dialog --dismiss --dialog-id d1
 openclaw browser wait --text "Done"
 openclaw browser wait "#main" --url "**/dash" --load networkidle --fn "window.ready===true"
 openclaw browser evaluate --fn '(el) => el.textContent' --ref 7
+openclaw browser evaluate --timeout-ms 30000 --fn 'async () => { await window.ready; return true; }'
 openclaw browser highlight e12
 openclaw browser trace start
 openclaw browser trace stop
@@ -209,38 +236,68 @@ openclaw browser set device "iPhone 14"
 
 Notes:
 
-- `upload` and `dialog` are **arming** calls; run them before the click/press that triggers the chooser/dialog.
-- `click`/`type`/etc require a `ref` from `snapshot` (numeric `12` or role ref `e12`). CSS selectors are intentionally not supported for actions.
-- Download, trace, and upload paths are constrained to OpenClaw temp roots: `/tmp/openclaw{,/downloads,/uploads}` (fallback: `${os.tmpdir()}/openclaw/...`).
+- `upload` and `dialog` are **arming** calls; run them before the click/press that triggers the chooser/dialog. If an action opens a modal, the action response includes `blockedByDialog` and `browserState.dialogs.pending`; pass that `dialogId` to respond directly. Dialogs handled outside OpenClaw appear under `browserState.dialogs.recent`.
+- `click`/`type`/etc require a `ref` from `snapshot` (numeric `12`, role ref `e12`, or actionable ARIA ref `ax12`). CSS selectors are intentionally not supported for actions. Use `click-coords` when the visible viewport position is the only reliable target.
+- Download and trace paths are constrained to OpenClaw temp roots: `/tmp/openclaw{,/downloads}` (fallback: `${os.tmpdir()}/openclaw/...`).
+- `upload` accepts files from the OpenClaw temp uploads root and
+  OpenClaw-managed inbound media. Managed inbound media can be referenced as
+  `media://inbound/<id>`, sandbox-relative `media/inbound/<id>`, or a resolved
+  path inside the managed inbound media directory. Nested media refs,
+  traversal, symlinks, hardlinks, and arbitrary local paths are still rejected.
 - `upload` can also set file inputs directly via `--input-ref` or `--element`.
+
+Stable tab ids and labels survive Chromium raw-target replacement when OpenClaw
+can prove the replacement tab, such as same URL or a single old tab becoming a
+single new tab after form submission. Raw target ids are still volatile; prefer
+`suggestedTargetId` from `tabs` in scripts.
 
 Snapshot flags at a glance:
 
 - `--format ai` (default with Playwright): AI snapshot with numeric refs (`aria-ref="<n>"`).
-- `--format aria`: accessibility tree, no refs; inspection only.
+- `--format aria`: accessibility tree with `axN` refs. When Playwright is available, OpenClaw binds refs with backend DOM ids to the live page so follow-up actions can use them; otherwise treat the output as inspection-only.
 - `--efficient` (or `--mode efficient`): compact role snapshot preset. Set `browser.snapshotDefaults.mode: "efficient"` to make this the default (see [Gateway configuration](/gateway/configuration-reference#browser)).
 - `--interactive`, `--compact`, `--depth`, `--selector` force a role snapshot with `ref=e12` refs. `--frame "<iframe>"` scopes role snapshots to an iframe.
-- `--labels` adds a viewport-only screenshot with overlayed ref labels (prints `MEDIA:<path>`).
+- `--labels` adds a viewport-only screenshot with overlayed ref labels and prints the saved path.
+- `--urls` appends discovered link destinations to AI snapshots.
 
 ## Snapshots and refs
 
-OpenClaw supports two “snapshot” styles:
+OpenClaw supports two "snapshot" styles:
 
 - **AI snapshot (numeric refs)**: `openclaw browser snapshot` (default; `--format ai`)
   - Output: a text snapshot that includes numeric refs.
   - Actions: `openclaw browser click 12`, `openclaw browser type 23 "hello"`.
-  - Internally, the ref is resolved via Playwright’s `aria-ref`.
+  - Internally, the ref is resolved via Playwright's `aria-ref`.
 
 - **Role snapshot (role refs like `e12`)**: `openclaw browser snapshot --interactive` (or `--compact`, `--depth`, `--selector`, `--frame`)
   - Output: a role-based list/tree with `[ref=e12]` (and optional `[nth=1]`).
   - Actions: `openclaw browser click e12`, `openclaw browser highlight e12`.
   - Internally, the ref is resolved via `getByRole(...)` (plus `nth()` for duplicates).
   - Add `--labels` to include a viewport screenshot with overlayed `e12` labels.
+  - Add `--urls` when link text is ambiguous and the agent needs concrete
+    navigation targets.
+
+- **ARIA snapshot (ARIA refs like `ax12`)**: `openclaw browser snapshot --format aria`
+  - Output: the accessibility tree as structured nodes.
+  - Actions: `openclaw browser click ax12` works when the snapshot path can bind
+    the ref through Playwright and Chrome backend DOM ids.
+- If Playwright is unavailable, ARIA snapshots can still be useful for
+  inspection, but refs may not be actionable. Re-snapshot with `--format ai`
+  or `--interactive` when you need action refs.
+- Docker proof for the raw-CDP fallback path: `pnpm test:docker:browser-cdp-snapshot`
+  starts Chromium with CDP, runs `browser doctor --deep`, and verifies role
+  snapshots include link URLs, cursor-promoted clickables, and iframe metadata.
 
 Ref behavior:
 
 - Refs are **not stable across navigations**; if something fails, re-run `snapshot` and use a fresh ref.
+- `/act` returns the current raw `targetId` after action-triggered replacement
+  when it can prove the replacement tab. Keep using stable tab ids/labels for
+  follow-up commands.
 - If the role snapshot was taken with `--frame`, role refs are scoped to that iframe until the next role snapshot.
+- Unknown or stale `axN` refs fail fast instead of falling through to
+  Playwright's `aria-ref` selector. Run a fresh snapshot on the same tab when
+  that happens.
 
 ## Wait power-ups
 
@@ -267,7 +324,7 @@ openclaw browser wait "#main" \
 
 ## Debug workflows
 
-When an action fails (e.g. “not visible”, “strict mode violation”, “covered”):
+When an action fails (e.g. "not visible", "strict mode violation", "covered"):
 
 1. `openclaw browser snapshot --interactive`
 2. Use `click <ref>` / `type <ref>` (prefer role refs in interactive mode)
@@ -297,7 +354,7 @@ Role snapshots in JSON include `refs` plus a small `stats` block (lines/chars/re
 
 ## State and environment knobs
 
-These are useful for “make the site behave like X” workflows:
+These are useful for "make the site behave like X" workflows:
 
 - Cookies: `cookies`, `cookies set`, `cookies clear`
 - Storage: `storage local|session get|set|clear`
@@ -317,6 +374,8 @@ These are useful for “make the site behave like X” workflows:
 - `browser act kind=evaluate` / `openclaw browser evaluate` and `wait --fn`
   execute arbitrary JavaScript in the page context. Prompt injection can steer
   this. Disable it with `browser.evaluateEnabled=false` if you do not need it.
+- Use `openclaw browser evaluate --timeout-ms <ms>` when the page-side function
+  may need longer than the default evaluate timeout.
 - For logins and anti-bot notes (X/Twitter, etc.), see [Browser login + X/Twitter posting](/tools/browser-login).
 - Keep the Gateway/node host private (loopback or tailnet-only).
 - Remote CDP endpoints are powerful; tunnel and protect them.
@@ -337,7 +396,7 @@ Strict-mode example (block private/internal destinations by default):
 
 ## Related
 
-- [Browser](/tools/browser) — overview, configuration, profiles, security
-- [Browser login](/tools/browser-login) — signing in to sites
+- [Browser](/tools/browser) - overview, configuration, profiles, security
+- [Browser login](/tools/browser-login) - signing in to sites
 - [Browser Linux troubleshooting](/tools/browser-linux-troubleshooting)
 - [Browser WSL2 troubleshooting](/tools/browser-wsl2-windows-remote-cdp-troubleshooting)

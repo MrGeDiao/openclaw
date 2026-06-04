@@ -8,6 +8,7 @@ import {
   createTestChannelPlugin,
 } from "./targets.test-helpers.js";
 
+/** Installs target-resolution plugin registry fixtures around shared tests. */
 export function installResolveOutboundTargetPluginRegistryHooks(): void {
   beforeEach(() => {
     setActivePluginRegistry(
@@ -82,6 +83,18 @@ export function runResolveOutboundTargetCoreTests(): void {
       expect(res.ok).toBe(false);
       if (!res.ok) {
         expect(res.error.message).toContain(expectedErrorIncludes);
+      }
+    });
+
+    it("rejects a target prefixed for a different channel before plugin normalization", () => {
+      const res = resolveOutboundTarget({
+        channel: "alpha",
+        to: "beta:room-one",
+        mode: "explicit",
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.error.message).toContain("belongs to beta, not alpha");
       }
     });
 

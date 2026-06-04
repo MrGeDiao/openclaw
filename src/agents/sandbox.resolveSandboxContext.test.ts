@@ -8,20 +8,40 @@ import { ensureSandboxWorkspaceForSession, resolveSandboxContext } from "./sandb
 
 const updateRegistryMock = vi.hoisted(() => vi.fn());
 const syncSkillsToWorkspaceMock = vi.hoisted(() => vi.fn(async () => undefined));
+const ensureSandboxBrowserMock = vi.hoisted(() => vi.fn(async () => null));
+const browserControlAuthMock = vi.hoisted(() => ({
+  ensureBrowserControlAuth: vi.fn(async () => ({ auth: { token: "test-browser-token" } })),
+  resolveBrowserControlAuth: vi.fn(() => ({ token: "test-browser-token" })),
+}));
+const browserProfilesMock = vi.hoisted(() => ({
+  DEFAULT_BROWSER_EVALUATE_ENABLED: true,
+  resolveBrowserConfig: vi.fn(() => ({
+    evaluateEnabled: true,
+    ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
+  })),
+}));
 
 vi.mock("./sandbox/registry.js", () => ({
   updateRegistry: updateRegistryMock,
 }));
 
-vi.mock("../infra/skills-remote.js", () => ({
-  getRemoteSkillEligibility: vi.fn(() => ({ note: "test-remote" })),
+vi.mock("./sandbox/browser.js", () => ({
+  ensureSandboxBrowser: ensureSandboxBrowserMock,
 }));
+
+vi.mock("../plugin-sdk/browser-control-auth.js", () => browserControlAuthMock);
+
+vi.mock("../plugin-sdk/browser-profiles.js", () => browserProfilesMock);
 
 vi.mock("./exec-defaults.js", () => ({
   canExecRequestNode: vi.fn(() => false),
 }));
 
-vi.mock("./skills.js", () => ({
+vi.mock("../skills/runtime/remote.js", () => ({
+  getRemoteSkillEligibility: vi.fn(() => ({ note: "test-remote" })),
+}));
+
+vi.mock("../skills/loading/workspace.js", () => ({
   syncSkillsToWorkspace: syncSkillsToWorkspaceMock,
 }));
 
@@ -79,6 +99,58 @@ describe("resolveSandboxContext", () => {
     });
 
     expect(result).toBeNull();
+  }, 15_000);
+
+  it("does not touch sandbox backends for cron or sub-agent sessions when sandbox mode is off", async () => {
+    const backendFactory = vi.fn(async () => ({
+      id: "test-off-backend",
+      runtimeId: "unexpected-runtime",
+      runtimeLabel: "Unexpected Runtime",
+      workdir: "/workspace",
+      buildExecSpec: async () => ({
+        argv: ["unexpected"],
+        env: process.env,
+        stdinMode: "pipe-closed" as const,
+      }),
+      runShellCommand: async () => ({
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.alloc(0),
+        code: 0,
+      }),
+    }));
+    const restore = registerSandboxBackend("test-off-backend", backendFactory);
+    try {
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            sandbox: {
+              mode: "off",
+              backend: "test-off-backend",
+              scope: "session",
+            },
+          },
+        },
+      };
+
+      await expect(
+        resolveSandboxContext({
+          config: cfg,
+          sessionKey: "agent:main:cron:job:run:uuid",
+          workspaceDir: "/tmp/openclaw-test",
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        resolveSandboxContext({
+          config: cfg,
+          sessionKey: "agent:main:subagent:child",
+          workspaceDir: "/tmp/openclaw-test",
+        }),
+      ).resolves.toBeNull();
+
+      expect(backendFactory).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
   }, 15_000);
 
   it("treats main session aliases as main in non-main mode", async () => {
@@ -172,6 +244,60 @@ describe("resolveSandboxContext", () => {
     }
   }, 15_000);
 
+  it("passes the resolved browser SSRF policy to sandbox browser setup", async () => {
+    ensureSandboxBrowserMock.mockClear();
+    const restore = registerSandboxBackend("test-browser-backend", async () => ({
+      id: "test-browser-backend",
+      runtimeId: "test-browser-runtime",
+      runtimeLabel: "Test Browser Runtime",
+      workdir: "/workspace",
+      capabilities: { browser: true },
+      buildExecSpec: async () => ({
+        argv: ["test-browser-backend", "exec"],
+        env: process.env,
+        stdinMode: "pipe-closed",
+      }),
+      runShellCommand: async () => ({
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.alloc(0),
+        code: 0,
+      }),
+    }));
+    try {
+      const cfg: OpenClawConfig = {
+        browser: {
+          ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
+        },
+        agents: {
+          defaults: {
+            sandbox: {
+              mode: "all",
+              backend: "test-browser-backend",
+              scope: "session",
+              workspaceAccess: "rw",
+              prune: { idleHours: 0, maxAgeDays: 0 },
+              browser: { enabled: true },
+            },
+          },
+        },
+      };
+
+      await resolveSandboxContext({
+        config: cfg,
+        sessionKey: "agent:worker:browser",
+        workspaceDir: "/tmp/openclaw-test",
+      });
+
+      const browserCalls = ensureSandboxBrowserMock.mock.calls as unknown as Array<
+        [{ ssrfPolicy?: unknown }]
+      >;
+      const [browserOptions] = browserCalls[0] ?? [];
+      expect(browserOptions?.ssrfPolicy).toEqual({ dangerouslyAllowPrivateNetwork: true });
+    } finally {
+      restore();
+    }
+  }, 15_000);
+
   it("requests skill sync for read-only sandbox workspaces", async () => {
     syncSkillsToWorkspaceMock.mockClear();
     const bundledDir = await createSandboxFixtureDir("bundled");
@@ -196,15 +322,26 @@ describe("resolveSandboxContext", () => {
       workspaceDir,
     });
 
-    expect(result).not.toBeNull();
-    expect(syncSkillsToWorkspaceMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sourceWorkspaceDir: workspaceDir,
-        targetWorkspaceDir: result?.workspaceDir,
-        config: cfg,
-        agentId: "main",
-        eligibility: { remote: { note: "test-remote" } },
-      }),
-    );
+    if (!result) {
+      throw new Error("expected sandbox workspace resolution");
+    }
+    expect(typeof result.workspaceDir).toBe("string");
+    const syncCalls = syncSkillsToWorkspaceMock.mock.calls as unknown as Array<
+      [
+        {
+          sourceWorkspaceDir?: string;
+          targetWorkspaceDir?: string;
+          config?: OpenClawConfig;
+          agentId?: string;
+          eligibility?: unknown;
+        },
+      ]
+    >;
+    const [syncOptions] = syncCalls[0] ?? [];
+    expect(syncOptions?.sourceWorkspaceDir).toBe(workspaceDir);
+    expect(syncOptions?.targetWorkspaceDir).toBe(result.workspaceDir);
+    expect(syncOptions?.config).toBe(cfg);
+    expect(syncOptions?.agentId).toBe("main");
+    expect(syncOptions?.eligibility).toEqual({ remote: { note: "test-remote" } });
   }, 15_000);
 });

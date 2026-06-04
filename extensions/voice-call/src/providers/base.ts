@@ -1,4 +1,5 @@
 import type {
+  AnswerCallInput,
   GetCallStatusInput,
   GetCallStatusResult,
   HangupCallInput,
@@ -30,6 +31,8 @@ export interface VoiceCallProvider {
   /** Provider identifier */
   readonly name: ProviderName;
 
+  setPublicUrl?(url: string): void;
+
   /**
    * Verify webhook signature/HMAC before processing.
    * Must be called before parseWebhookEvent.
@@ -43,10 +46,22 @@ export interface VoiceCallProvider {
   parseWebhookEvent(ctx: WebhookContext, options?: WebhookParseOptions): ProviderWebhookParseResult;
 
   /**
+   * Consume one-time TwiML that must be served before shortcut handlers such as
+   * realtime media streams take over the webhook response.
+   */
+  consumeInitialTwiML?: (ctx: WebhookContext) => string | null;
+
+  /**
    * Initiate an outbound call.
    * @returns Provider call ID and status
    */
   initiateCall(input: InitiateCallInput): Promise<InitiateCallResult>;
+
+  /**
+   * Answer an accepted inbound call when the provider requires an explicit
+   * answer command after the initial webhook.
+   */
+  answerCall?: (input: AnswerCallInput) => Promise<void>;
 
   /**
    * Hang up an active call.
